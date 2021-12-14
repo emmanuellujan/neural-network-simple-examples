@@ -1,3 +1,10 @@
+"""
+
+Fitting -sin(t) using a neural network
+
+"""
+
+
 using LinearAlgebra
 using GalacticOptim, Optim, Flux
 using Plots
@@ -43,7 +50,7 @@ nhl = 10; nw = 3*nhl+1; w0 = 20.0*rand(nw).-10.0; p = [nhl]
 f = OptimizationFunction(loss, GalacticOptim.AutoZygote())
 prob = OptimizationProblem(f, w0, p)
 sol = solve(prob, ADAM(0.1), maxiters=8000)
-prob = remake(prob,u0=sol.minimizer)
+prob = remake(prob, u0=sol.minimizer)
 sol = solve(prob, ADAM(0.001), maxiters=2000)
 
 # Plot result
