@@ -66,12 +66,12 @@ end
 
 # Optimization
 range = 0.0:0.01:4.0
-nhl = 10; nw = 3*nhl+1; w0 = 30.0*rand(nw).-15.0; p = [nhl]
+nhl = 10; nw = 3*nhl+1; w0 = 20.0*rand(nw).-10.0; p = [nhl]
 f = OptimizationFunction(loss, GalacticOptim.AutoZygote())
 prob = OptimizationProblem(f, w0, p)
-sol = solve(prob, ADAM(0.01), maxiters=8000)
+sol = solve(prob, ADAM(0.5), maxiters=10000)
 prob = remake(prob, u0=sol.minimizer)
-sol = solve(prob, ADAM(0.001), maxiters=4000)
+sol = solve(prob, ADAM(0.01), maxiters=4000)
 
 # Plot result
 plot([ target(t) for t in range ])
