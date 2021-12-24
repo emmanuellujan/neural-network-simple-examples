@@ -6,7 +6,7 @@ Fitting atomic forces using a neural network
 
 using Unitful, PeriodicTable, StaticArrays, LinearAlgebra
 using AtomsBase
-using ElectronicStructure
+#using ElectronicStructure
 using InteratomicPotentials
 #using PotentialLearning
 
@@ -16,8 +16,9 @@ using Flux: @epochs
 using Base: @kwdef
 using CUDA
 
-
-# Functions about data generation ##############################################
+################################################################################
+# Data generation functions
+################################################################################
 
 """
     gen_test_atomic_conf()
@@ -62,7 +63,7 @@ function gen_test_atomic_conf()
 end
 
 """
-    gen_test_atomic_conf()
+    gen_test_atomic_conf_2()
 
 Generate test atomic configurations. Atoms positions are random.
 """
@@ -125,57 +126,50 @@ function compute_forces(neighbor_dists, p)
     f = []
     for d in neighbor_dists
         if length(d)>0
-            aux = Float32.(sum(force.(d, [p])))
+            aux = sum(force.(d, [p]))
         else
-            aux = [0.0f0, 0.0f0, 0.0f0]
+            aux = [0.0, 0.0, 0.0]
         end
-        push!(f, aux)
+        push!(f, Float32.(aux))
     end
     return f
 end
 
 """
-    getdata(args, p, rcutoff)
+    gen_data(train_prop, batchsize, p, rcutoff)
 
 Compute neighbor distances and forces for training and validation.
 """
-function getdata(args, p, rcutoff)
+function gen_data(train_prop, batchsize, rcutoff, p)
     ENV["DATADEPS_ALWAYS_ACCEPT"] = "true"
 
     # Generate test atomic configurations: domain and particles (position, velocity, etc)
     atomic_confs = gen_test_atomic_conf()
 
-    # Generate learning data using Lennard Jones and the atomic configurations
+    # Generate neighbor distances (vectors)
     neighbor_dists = vcat(compute_neighbor_dists.(atomic_confs, rcutoff)...)
-    N = floor(Int, args.train_prop * length(neighbor_dists))
-    
+    N = floor(Int, train_prop * length(neighbor_dists))
     train_neighbor_dists = neighbor_dists[1:N]
     test_neighbor_dists = neighbor_dists[N+1:end]
 
+    # Generate learning data using the potential `p` and the atomic configurations
     f_train = compute_forces(train_neighbor_dists, p)
     f_test = compute_forces(test_neighbor_dists, p)
 
     # Create DataLoaders (mini-batch iterators)
-    train_loader = DataLoader((train_neighbor_dists, f_train), batchsize=args.batchsize)
-    test_loader  = DataLoader((test_neighbor_dists, f_test), batchsize=args.batchsize)
+    train_loader = DataLoader((train_neighbor_dists, f_train), batchsize=batchsize)
+    test_loader  = DataLoader((test_neighbor_dists, f_test), batchsize=batchsize)
 
     return train_loader, test_loader
 end
 
-# Model definition #############################################################
-
-# Input arguments
-@kwdef mutable struct Args
-    η::Float64 = 3e-4       # learning rate
-    train_prop = 0.8        # training set proportion
-    batchsize::Int = 40     # batch size
-    epochs::Int = 1000      # number of epochs
-    use_cuda::Bool = false  # use gpu (if cuda available)
-end
-args = Args()
+################################################################################
+# Model definition
+################################################################################
 
 # GPU usage
-if CUDA.functional() && args.use_cuda
+use_cuda = false  # use gpu (if cuda available)
+if CUDA.functional() && use_cuda
     @info "Training on CUDA GPU"
     CUDA.allowscalar(true)
     device1 = gpu
@@ -184,64 +178,65 @@ else
     device1 = cpu
 end
 
-# Potential definition
-lj_ϵ = 1.0; lj_σ = 1.0; rcutoff = 2.5*lj_σ; lj = LennardJones(lj_ϵ, lj_σ)
+# Input data: create test and train dataloaders
+train_prop = 0.8; batchsize = 40
+lj_ϵ = 1.0; lj_σ = 1.0; rcutoff = 2.5*lj_σ; lj = LennardJones(lj_ϵ, lj_σ);
+train_loader, test_loader = gen_data(train_prop, batchsize, rcutoff, lj)
 
-# Create test and train dataloaders
-train_loader, test_loader = getdata(args, lj, rcutoff)
-
-# Construct model
+# Model: neural network
 model = Chain(Dense(3,20,Flux.σ),Dense(20,3)) |> device1
 ps = Flux.params(model) # model's trainable parameters
 
 # Optimizer
-opt = ADAM(args.η)
+η = 3e-4 # learning rate
+opt = ADAM(η)
 
 # Loss function
 loss(model, neighbor_dists, forces) = 
             sqrt(sum( [ length(d)>0f0 ? norm(sum(model.(d)) - f)^2 : 0f0
                         for (d, f) in zip(neighbor_dists, forces)]))
 
-# Training #####################################################################
+################################################################################
+# Training
+################################################################################
 
-for epoch in 1:args.epochs
+epochs = 1000
+for epoch in 1:epochs
+    # Training of one epoch
     for (d, f) in train_loader
         d, f = device1(d), device1(f) # transfer data to device
         gs = gradient(() -> loss(model, d, f), ps) # compute gradient
         Flux.Optimise.update!(opt, ps, gs) # update parameters
     end
 
-    train_loss_sum = 0f0
+    # Report traning loss
+    train_loss_sum = 0.0
     for (d, f) in train_loader
-        d, f = device1(d), device1(f) # transfer data to device
+        d, f = device1(d), device1(f)
         train_loss_sum += loss(model, d, f)
     end
-    test_loss_sum = 0f0
-    for (d, f) in test_loader
-        d, f = device1(d), device1(f) # transfer data to device
-        test_loss_sum += loss(model, d, f)
-    end
-    
-    println("Epoch:", epoch, ", train loss:", train_loss_sum / length(train_loader),
-                             ", test loss:", test_loss_sum / length(test_loader))
+    println("Epoch:", epoch, ", loss:", train_loss_sum / length(train_loader))
 
 end
+println("")
 
-# Validation ###################################################################
 
-max_rel_error = 0f0
-max_abs_error = 0f0
+################################################################################
+# Validation
+################################################################################
+
+max_rel_error = 0.0; max_abs_error = 0.0
 for (d, f) in test_loader
-    neighbor_dists, forces = device1(d), device1(f) # transfer data to device
+    d, f = device1(d), device1(f) # transfer data to device
     
-    aux = maximum([ length(d)>0f0 ? norm(sum(model.(d)) - f) / norm(sum(model.(d))) : 0f0
-                     for (d, f) in zip(neighbor_dists, forces)])
+    aux = maximum([ length(d0)>0 ? norm(sum(model.(d0)) - f0) / norm(sum(model.(d0))) : 0.0
+                    for (d0, f0) in zip(d, f)])
     if aux > max_rel_error
         global max_rel_error = aux
     end
     
-    aux = maximum( [ length(d)>0f0 ? norm(sum(model.(d)) - f) : 0f0
-                     for (d, f) in zip(neighbor_dists, forces)])
+    aux = maximum( [ length(d0)>0 ? norm(sum(model.(d0)) - f0) : 0.0
+                     for (d0, f0) in zip(d, f)])
     if aux > max_abs_error
         global max_abs_error = aux
     end
