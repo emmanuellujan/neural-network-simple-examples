@@ -42,6 +42,7 @@ function gen_test_atomic_conf()
     # Define atomic configurations
     atomic_confs = []
     for j in 1:M
+        #σ0 = ((2.0 - 0.1) / (M - 1) * (j - 1) + 0.1)u"Å"
         atoms = []
         ϕ = rand() * 2.0 * π; θ = rand() * π
         x = (L/2.0-σ0) * cos(ϕ) * sin(θ) + L/2.0
@@ -65,7 +66,7 @@ end
 """
     gen_test_atomic_conf_2()
 
-Generate test atomic configurations. Atoms positions are random.
+Generate test atomic configurations. Atom positions are random.
 """
 function gen_test_atomic_conf_2()
     # Domain
@@ -130,7 +131,7 @@ function compute_forces(neighbor_dists, p)
         else
             aux = [0.0, 0.0, 0.0]
         end
-        push!(f, Float32.(aux))
+        push!(f, aux)
     end
     return f
 end
@@ -179,22 +180,22 @@ else
 end
 
 # Input data: create test and train dataloaders
-train_prop = 0.8; batchsize = 40
+train_prop = 0.8; batchsize = 200
 lj_ϵ = 1.0; lj_σ = 1.0; rcutoff = 2.5*lj_σ; lj = LennardJones(lj_ϵ, lj_σ);
 train_loader, test_loader = gen_data(train_prop, batchsize, rcutoff, lj)
 
 # Model: neural network
-model = Chain(Dense(3,20,Flux.σ),Dense(20,3)) |> device1
+model = Chain(Dense(3,150,Flux.σ),Dense(150,3)) |> device1
 ps = Flux.params(model) # model's trainable parameters
 
 # Optimizer
-η = 3e-4 # learning rate
+η = 0.1 # learning rate
 opt = ADAM(η)
 
-# Loss function
+# Loss function: root mean squared error (rmse)
 loss(model, neighbor_dists, forces) = 
-            sqrt(sum( [ length(d)>0f0 ? norm(sum(model.(d)) - f)^2 : 0f0
-                        for (d, f) in zip(neighbor_dists, forces)]))
+       sqrt( sum( [ length(d)>0 ? norm(sum(model.(d)) - f)^2 : 0.0
+                    for (d, f) in zip(neighbor_dists, forces)]) / length(forces))
 
 ################################################################################
 # Training
@@ -225,6 +226,7 @@ println("")
 # Validation
 ################################################################################
 
+# Maximum relative error #######################################################
 max_rel_error = 0.0; max_abs_error = 0.0
 for (d, f) in test_loader
     d, f = device1(d), device1(f) # transfer data to device
@@ -243,5 +245,9 @@ for (d, f) in test_loader
 end
 println("Maximum relative error: ", max_rel_error)
 println("Maximum absolute error: ", max_abs_error)
+
+
+
+
 
 
