@@ -36,7 +36,7 @@ function gen_test_atomic_conf()
     # No. of atoms per configuration
     N = 2
     # No. of configurations
-    M = 100
+    M = 1000
     # Element
     elem = elements[:Ar]
     # Define atomic configurations
@@ -158,7 +158,7 @@ function gen_data(train_prop, batchsize, rcutoff, p)
     f_test = compute_forces(test_neighbor_dists, p)
 
     # Create DataLoaders (mini-batch iterators)
-    train_loader = DataLoader((train_neighbor_dists, f_train), batchsize=batchsize)
+    train_loader = DataLoader((train_neighbor_dists, f_train), batchsize=batchsize, shuffle=true)
     test_loader  = DataLoader((test_neighbor_dists, f_test), batchsize=batchsize)
 
     return train_loader, test_loader
@@ -246,8 +246,13 @@ end
 println("Maximum relative error: ", max_rel_error)
 println("Maximum absolute error: ", max_abs_error)
 
-
-
-
+# Test loss: root mean squared error (rmse) ####################################
+test_loss = 0.0
+for (d, f) in test_loader
+    d, f = device1(d), device1(f) # transfer data to device
+    test_loss += loss(model, d, f) 
+end
+test_loss = test_loss / length(test_loader)
+println("Test RMSE: ", test_loss)
 
 
