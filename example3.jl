@@ -169,7 +169,7 @@ end
 ################################################################################
 
 # GPU usage
-use_cuda = false  # use gpu (if cuda available)
+use_cuda = true  # use gpu (if cuda available)
 if CUDA.functional() && use_cuda
     @info "Training on CUDA GPU"
     CUDA.allowscalar(true)
@@ -193,28 +193,28 @@ ps = Flux.params(model) # model's trainable parameters
 opt = ADAM(η)
 
 # Loss function: root mean squared error (rmse)
-loss(model, neighbor_dists, forces) = 
-       sqrt( sum( [ length(d)>0 ? norm(sum(model.(d)) - f)^2 : 0.0
+loss(model, neighbor_dists, forces, device) = 
+       sqrt( sum( [ length(d)>0 ? norm(sum(model.(device(Vector.(d)))) - device(Vector(f)))^2 : 0.0
                     for (d, f) in zip(neighbor_dists, forces)]) / length(forces))
 
 ################################################################################
 # Training
 ################################################################################
 
-epochs = 1000
+epochs = 50
 for epoch in 1:epochs
     # Training of one epoch
     for (d, f) in train_loader
-        d, f = device1(d), device1(f) # transfer data to device
-        gs = gradient(() -> loss(model, d, f), ps) # compute gradient
+        #d, f = device1(d), device1(f) # transfer data to device
+        gs = gradient(() -> loss(model, d, f, device1), ps) # compute gradient
         Flux.Optimise.update!(opt, ps, gs) # update parameters
     end
-
+    
     # Report traning loss
     train_loss_sum = 0.0
     for (d, f) in train_loader
-        d, f = device1(d), device1(f)
-        train_loss_sum += loss(model, d, f)
+        #d, f = device1(Vector(d)), device1(f)
+        train_loss_sum += loss(model, d, f, device1)
     end
     println("Epoch:", epoch, ", loss:", train_loss_sum / length(train_loader))
 
@@ -222,35 +222,35 @@ end
 println("")
 
 
-################################################################################
-# Validation
-################################################################################
+#################################################################################
+## Validation
+#################################################################################
 
 # Maximum relative error #######################################################
-max_rel_error = 0.0; max_abs_error = 0.0
-for (d, f) in test_loader
-    d, f = device1(d), device1(f) # transfer data to device
-    
-    aux = maximum([ length(d0)>0 ? norm(sum(model.(d0)) - f0) / norm(sum(model.(d0))) : 0.0
-                    for (d0, f0) in zip(d, f)])
-    if aux > max_rel_error
-        global max_rel_error = aux
-    end
-    
-    aux = maximum( [ length(d0)>0 ? norm(sum(model.(d0)) - f0) : 0.0
-                     for (d0, f0) in zip(d, f)])
-    if aux > max_abs_error
-        global max_abs_error = aux
-    end
-end
-println("Maximum relative error: ", max_rel_error)
-println("Maximum absolute error: ", max_abs_error)
+#max_rel_error = device1(0.0); max_abs_error = device1(0.0)
+#for (d, f) in test_loader
+#    #d, f = device1(d), device1(f) # transfer data to device
+#    
+#    aux = maximum([ length(d0)>0 ? norm(sum(model.(device1(Vector.(d0)))) - device1(Vector(f0))) / sum(model.(device1(Vector.(d0)))) : 0.0
+#                    for (d0, f0) in zip(d, f)])
+#    if aux > max_rel_error
+#        global max_rel_error = aux
+#    end
+#    
+#    aux = maximum([ length(d0)>0 ? norm(sum(model.(device1(Vector.(d0)))) - device1(Vector(f0))) : 0.0
+#                    for (d0, f0) in zip(d, f)])
+#    if aux > max_abs_error
+#        global max_abs_error = aux
+#    end
+#end
+#println("Maximum relative error: ", max_rel_error)
+#println("Maximum absolute error: ", max_abs_error)
 
 # Test loss: root mean squared error (rmse) ####################################
 test_loss = 0.0
 for (d, f) in test_loader
-    d, f = device1(d), device1(f) # transfer data to device
-    test_loss += loss(model, d, f) 
+    #d, f = device1(d), device1(f) # transfer data to device
+    global test_loss += loss(model, d, f, device1)
 end
 test_loss = test_loss / length(test_loader)
 println("Test RMSE: ", test_loss)
