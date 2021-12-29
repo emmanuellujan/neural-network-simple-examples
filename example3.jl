@@ -36,7 +36,7 @@ function gen_test_atomic_conf()
     # No. of atoms per configuration
     N = 2
     # No. of configurations
-    M = 1000
+    M = 50000
     # Element
     elem = elements[:Ar]
     # Define atomic configurations
@@ -107,7 +107,7 @@ function compute_neighbor_dists(atomic_conf, rcutoff)
         for j in 1:N
             r = position(getindex(atomic_conf, i)) -
                 position(getindex(atomic_conf, j))
-            r = SVector(map((x -> x.val), r.data))
+            r = SVector(map((x -> x.val), r.data)...)
             if 0 < norm(r) < rcutoff
                 push!(neighbor_dists_i, r)
             end
@@ -129,7 +129,7 @@ function compute_forces(neighbor_dists, p)
         if length(d)>0
             aux = sum(force.(d, [p]))
         else
-            aux = [0.0, 0.0, 0.0]
+            aux = SVector(0.0, 0.0, 0.0)
         end
         push!(f, aux)
     end
@@ -141,7 +141,7 @@ end
 
 Compute neighbor distances and forces for training and validation.
 """
-function gen_data(train_prop, batchsize, rcutoff, p)
+function gen_data(train_prop, batchsize, rcutoff, p, use_cuda)
     ENV["DATADEPS_ALWAYS_ACCEPT"] = "true"
 
     # Generate test atomic configurations: domain and particles (position, velocity, etc)
@@ -156,6 +156,14 @@ function gen_data(train_prop, batchsize, rcutoff, p)
     # Generate learning data using the potential `p` and the atomic configurations
     f_train = compute_forces(train_neighbor_dists, p)
     f_test = compute_forces(test_neighbor_dists, p)
+    
+    # If CUDA is used, convert SVector to Vector
+    if use_cuda
+        train_neighbor_dists = [gpu.(convert.(Vector, d)) for d in train_neighbor_dists]
+        test_neighbor_dists =  [gpu.(convert.(Vector, d)) for d in test_neighbor_dists]
+        f_train = gpu.(convert.(Vector, f_train))
+        f_test = gpu.(convert.(Vector, f_test))
+    end
 
     # Create DataLoaders (mini-batch iterators)
     train_loader = DataLoader((train_neighbor_dists, f_train), batchsize=batchsize, shuffle=true)
@@ -172,7 +180,7 @@ end
 use_cuda = true  # use gpu (if cuda available)
 if CUDA.functional() && use_cuda
     @info "Training on CUDA GPU"
-    CUDA.allowscalar(true)
+    CUDA.allowscalar(false)
     device1 = gpu
 else
     @info "Training on CPU"
@@ -180,9 +188,9 @@ else
 end
 
 # Input data: create test and train dataloaders
-train_prop = 0.8; batchsize = 200
+train_prop = 0.8; batchsize = 10000
 lj_ϵ = 1.0; lj_σ = 1.0; rcutoff = 2.5*lj_σ; lj = LennardJones(lj_ϵ, lj_σ);
-train_loader, test_loader = gen_data(train_prop, batchsize, rcutoff, lj)
+train_loader, test_loader = gen_data(train_prop, batchsize, rcutoff, lj, use_cuda)
 
 # Model: neural network
 model = Chain(Dense(3,150,Flux.σ),Dense(150,3)) |> device1
@@ -193,9 +201,14 @@ ps = Flux.params(model) # model's trainable parameters
 opt = ADAM(η)
 
 # Loss function: root mean squared error (rmse)
-loss(model, neighbor_dists, forces, device) = 
-       sqrt( sum( [ length(d)>0 ? norm(sum(model.(device(Vector.(d)))) - device(Vector(f)))^2 : 0.0
-                    for (d, f) in zip(neighbor_dists, forces)]) / length(forces))
+#loss(model, neighbor_dists, forces) = 
+#       sqrt( sum( [ length(d)>0 ? norm(sum(model.(d)) - f)^2 : 0.0
+#                    for (d, f) in zip(neighbor_dists, forces)]) / length(forces))
+
+function loss(model, neighbor_dists, forces)
+       f_model = [ length(d)>0 ? sum(model.(d)) : [0.0, 0.0, 0.0] for d in neighbor_dists]
+       return sqrt(sum(norm.(f_model .- forces).^2)/length(forces))
+end
 
 ################################################################################
 # Training
@@ -204,19 +217,17 @@ loss(model, neighbor_dists, forces, device) =
 epochs = 50
 for epoch in 1:epochs
     # Training of one epoch
-    for (d, f) in train_loader
-        #d, f = device1(d), device1(f) # transfer data to device
-        gs = gradient(() -> loss(model, d, f, device1), ps) # compute gradient
+    time = CUDA.@elapsed for (d, f) in train_loader
+        gs = gradient(() -> loss(model, d, f), ps) # compute gradient
         Flux.Optimise.update!(opt, ps, gs) # update parameters
     end
     
     # Report traning loss
     train_loss_sum = 0.0
     for (d, f) in train_loader
-        #d, f = device1(Vector(d)), device1(f)
-        train_loss_sum += loss(model, d, f, device1)
+        train_loss_sum += loss(model, d, f)
     end
-    println("Epoch:", epoch, ", loss:", train_loss_sum / length(train_loader))
+    println("Epoch:", epoch, ", loss:", train_loss_sum / length(train_loader), ", time:", time)
 
 end
 println("")
@@ -249,10 +260,17 @@ println("")
 # Test loss: root mean squared error (rmse) ####################################
 test_loss = 0.0
 for (d, f) in test_loader
-    #d, f = device1(d), device1(f) # transfer data to device
-    global test_loss += loss(model, d, f, device1)
+    global test_loss += loss(model, d, f)
 end
 test_loss = test_loss / length(test_loader)
 println("Test RMSE: ", test_loss)
+
+
+
+
+# Measure time:
+# @enlapsed(            bench(myfunc, arg1, arg2) )
+# @enlapsed( CUDA.@sync bench(myfunc, arg1, arg2) )
+
 
 
