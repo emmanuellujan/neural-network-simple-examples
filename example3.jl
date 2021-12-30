@@ -36,7 +36,7 @@ function gen_test_atomic_conf()
     # No. of atoms per configuration
     N = 2
     # No. of configurations
-    M = 50000
+    M = 10000
     # Element
     elem = elements[:Ar]
     # Define atomic configurations
@@ -189,7 +189,7 @@ end
 
 # Input data: create test and train dataloaders
 @info "Generating input data..."
-train_prop = 0.8; batchsize = 10000
+train_prop = 0.8; batchsize = 256
 lj_ϵ = 1.0; lj_σ = 1.0; rcutoff = 2.5*lj_σ; lj = LennardJones(lj_ϵ, lj_σ);
 train_loader, test_loader = gen_data(train_prop, batchsize, rcutoff, lj, use_cuda, device1)
 
@@ -203,7 +203,17 @@ opt = ADAM(η)
 
 # Loss function: root mean squared error (rmse)
 loss(f_model, forces) = sqrt(sum(norm.(f_model .- forces).^2) / length(forces))
-f_model(d) = [length(di)>0 ? sum(model.(di)) : zeros(3) for di in d]
+#f_model(d) = [length(di)>0 ? sum(model.(di)) : zeros(3) for di in d]
+function f_model(d) # faster in GPU
+    [ if length(di)>0
+        sum(map(di) do dij
+            model(dij)
+        end)
+      else
+        zeros(3)
+      end
+      for di in d]
+end
 loss(loader) = sum([loss(f_model(d), f) for (d, f) in loader]) / length(loader)
 
 ################################################################################
@@ -215,7 +225,6 @@ for epoch in 1:epochs
     # Training of one epoch
     time = CUDA.@elapsed for (d, f) in train_loader # or time = Base.@elapsed
         gs = gradient(() -> loss(f_model(d), f), ps)
-        #gs = gradient(() -> loss(f_model(d), f), ps)
         Flux.Optimise.update!(opt, ps, gs)
     end
     
@@ -232,23 +241,4 @@ end
 println("Test RMSE: ", loss(test_loader))
 
 
-# Maximum relative error #######################################################
-#max_rel_error = device1(0.0); max_abs_error = device1(0.0)
-#for (d, f) in test_loader
-#    #d, f = device1(d), device1(f) # transfer data to device
-#    
-#    aux = maximum([ length(d0)>0 ? norm(sum(model.(device1(Vector.(d0)))) - device1(Vector(f0))) / sum(model.(device1(Vector.(d0)))) : 0.0
-#                    for (d0, f0) in zip(d, f)])
-#    if aux > max_rel_error
-#        global max_rel_error = aux
-#    end
-#    
-#    aux = maximum([ length(d0)>0 ? norm(sum(model.(device1(Vector.(d0)))) - device1(Vector(f0))) : 0.0
-#                    for (d0, f0) in zip(d, f)])
-#    if aux > max_abs_error
-#        global max_abs_error = aux
-#    end
-#end
-#println("Maximum relative error: ", max_rel_error)
-#println("Maximum absolute error: ", max_abs_error)
 
