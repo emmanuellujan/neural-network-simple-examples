@@ -141,7 +141,7 @@ end
 
 Compute neighbor distances and forces for training and validation.
 """
-function gen_data(train_prop, batchsize, rcutoff, p, use_cuda)
+function gen_data(train_prop, batchsize, rcutoff, p, use_cuda, device)
     ENV["DATADEPS_ALWAYS_ACCEPT"] = "true"
 
     # Generate test atomic configurations: domain and particles (position, velocity, etc)
@@ -159,10 +159,10 @@ function gen_data(train_prop, batchsize, rcutoff, p, use_cuda)
     
     # If CUDA is used, convert SVector to Vector
     if use_cuda
-        train_neighbor_dists = [gpu.(convert.(Vector, d)) for d in train_neighbor_dists]
-        test_neighbor_dists =  [gpu.(convert.(Vector, d)) for d in test_neighbor_dists]
-        f_train = gpu.(convert.(Vector, f_train))
-        f_test = gpu.(convert.(Vector, f_test))
+        train_neighbor_dists = [device.(convert.(Vector, d)) for d in train_neighbor_dists]
+        test_neighbor_dists =  [device.(convert.(Vector, d)) for d in test_neighbor_dists]
+        f_train = device.(convert.(Vector, f_train))
+        f_test = device.(convert.(Vector, f_test))
     end
 
     # Create DataLoaders (mini-batch iterators)
@@ -190,7 +190,7 @@ end
 # Input data: create test and train dataloaders
 train_prop = 0.8; batchsize = 10000
 lj_ϵ = 1.0; lj_σ = 1.0; rcutoff = 2.5*lj_σ; lj = LennardJones(lj_ϵ, lj_σ);
-train_loader, test_loader = gen_data(train_prop, batchsize, rcutoff, lj, use_cuda)
+train_loader, test_loader = gen_data(train_prop, batchsize, rcutoff, lj, use_cuda, device1)
 
 # Model: neural network
 model = Chain(Dense(3,150,Flux.σ),Dense(150,3)) |> device1
@@ -201,41 +201,39 @@ ps = Flux.params(model) # model's trainable parameters
 opt = ADAM(η)
 
 # Loss function: root mean squared error (rmse)
-#loss(model, neighbor_dists, forces) = 
-#       sqrt( sum( [ length(d)>0 ? norm(sum(model.(d)) - f)^2 : 0.0
-#                    for (d, f) in zip(neighbor_dists, forces)]) / length(forces))
-
-function loss(model, neighbor_dists, forces)
-       f_model = [ length(d)>0 ? sum(model.(d)) : [0.0, 0.0, 0.0] for d in neighbor_dists]
-       return sqrt(sum(norm.(f_model .- forces).^2)/length(forces))
-end
+loss(f_model, forces) = sqrt(sum(norm.(f_model .- forces).^2)/length(forces))
+f_model(d) = [ length(di)>0 ? sum(model.(di)) : zeros(3) for di in d]
 
 ################################################################################
 # Training
 ################################################################################
 
-epochs = 50
+epochs = 25
 for epoch in 1:epochs
     # Training of one epoch
-    time = CUDA.@elapsed for (d, f) in train_loader
-        gs = gradient(() -> loss(model, d, f), ps) # compute gradient
-        Flux.Optimise.update!(opt, ps, gs) # update parameters
+    time = CUDA.@elapsed for (d, f) in train_loader # or time = Base.@elapsed
+        gs = gradient(() -> loss(f_model(d), f), ps)
+        Flux.Optimise.update!(opt, ps, gs)
     end
-    
+
     # Report traning loss
     train_loss_sum = 0.0
     for (d, f) in train_loader
-        train_loss_sum += loss(model, d, f)
+        train_loss_sum += loss(f_model(d), f)
     end
     println("Epoch:", epoch, ", loss:", train_loss_sum / length(train_loader), ", time:", time)
 
 end
-println("")
 
 
 #################################################################################
 ## Validation
 #################################################################################
+
+# Test loss: root mean squared error (rmse) ####################################
+test_loss = sum([loss(f_model(d), f) for (d, f) in test_loader]) / length(test_loader)
+println("Test RMSE: ", test_loss)
+
 
 # Maximum relative error #######################################################
 #max_rel_error = device1(0.0); max_abs_error = device1(0.0)
@@ -256,21 +254,4 @@ println("")
 #end
 #println("Maximum relative error: ", max_rel_error)
 #println("Maximum absolute error: ", max_abs_error)
-
-# Test loss: root mean squared error (rmse) ####################################
-test_loss = 0.0
-for (d, f) in test_loader
-    global test_loss += loss(model, d, f)
-end
-test_loss = test_loss / length(test_loader)
-println("Test RMSE: ", test_loss)
-
-
-
-
-# Measure time:
-# @enlapsed(            bench(myfunc, arg1, arg2) )
-# @enlapsed( CUDA.@sync bench(myfunc, arg1, arg2) )
-
-
 
