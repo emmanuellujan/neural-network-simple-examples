@@ -157,10 +157,10 @@ function gen_data(train_prop, batchsize, rcutoff, p, use_cuda, device)
     f_train = compute_forces(train_neighbor_dists, p)
     f_test = compute_forces(test_neighbor_dists, p)
     
-    # If CUDA is used, convert SVector to Vector
+    # If CUDA is used, convert SVector to Vector and transfer vectors to GPU
     if use_cuda
-        train_neighbor_dists = [device.(convert.(Vector, d)) for d in train_neighbor_dists]
-        test_neighbor_dists =  [device.(convert.(Vector, d)) for d in test_neighbor_dists]
+        train_neighbor_dists = device([device.(convert.(Vector, d)) for d in train_neighbor_dists])
+        test_neighbor_dists =  device([device.(convert.(Vector, d)) for d in test_neighbor_dists])
         f_train = device.(convert.(Vector, f_train))
         f_test = device.(convert.(Vector, f_test))
     end
@@ -188,6 +188,7 @@ else
 end
 
 # Input data: create test and train dataloaders
+@info "Generating input data..."
 train_prop = 0.8; batchsize = 10000
 lj_ϵ = 1.0; lj_σ = 1.0; rcutoff = 2.5*lj_σ; lj = LennardJones(lj_ϵ, lj_σ);
 train_loader, test_loader = gen_data(train_prop, batchsize, rcutoff, lj, use_cuda, device1)
@@ -201,28 +202,25 @@ ps = Flux.params(model) # model's trainable parameters
 opt = ADAM(η)
 
 # Loss function: root mean squared error (rmse)
-loss(f_model, forces) = sqrt(sum(norm.(f_model .- forces).^2)/length(forces))
-f_model(d) = [ length(di)>0 ? sum(model.(di)) : zeros(3) for di in d]
+loss(f_model, forces) = sqrt(sum(norm.(f_model .- forces).^2) / length(forces))
+f_model(d) = [length(di)>0 ? sum(model.(di)) : zeros(3) for di in d]
+loss(loader) = sum([loss(f_model(d), f) for (d, f) in loader]) / length(loader)
 
 ################################################################################
 # Training
 ################################################################################
-
-epochs = 25
+@info "Training..."
+epochs = 20
 for epoch in 1:epochs
     # Training of one epoch
     time = CUDA.@elapsed for (d, f) in train_loader # or time = Base.@elapsed
         gs = gradient(() -> loss(f_model(d), f), ps)
+        #gs = gradient(() -> loss(f_model(d), f), ps)
         Flux.Optimise.update!(opt, ps, gs)
     end
-
+    
     # Report traning loss
-    train_loss_sum = 0.0
-    for (d, f) in train_loader
-        train_loss_sum += loss(f_model(d), f)
-    end
-    println("Epoch:", epoch, ", loss:", train_loss_sum / length(train_loader), ", time:", time)
-
+    println("Epoch:", epoch, ", loss:", loss(train_loader), ", time:", time)
 end
 
 
@@ -231,8 +229,7 @@ end
 #################################################################################
 
 # Test loss: root mean squared error (rmse) ####################################
-test_loss = sum([loss(f_model(d), f) for (d, f) in test_loader]) / length(test_loader)
-println("Test RMSE: ", test_loss)
+println("Test RMSE: ", loss(test_loader))
 
 
 # Maximum relative error #######################################################
