@@ -136,13 +136,13 @@ function compute_neighbor_dists(atomic_conf, rcutoff)
 end
 
 # ╔═╡ 0fa4ca5a-f732-4630-991c-ff5e4b76c536
-md"Calculate the force ($f_i$) of each atom ($i$) using the position difference ($r_{i,j} = r_i - r_j$) to each of its neighbors ($j$) and the potential $p$ (e.g. [LennardJones](https://en.wikipedia.org/wiki/Lennard-Jones_potential))."
+md"Calculate the surrogate dft force ($f^{dft}_i$) of each atom ($i$) using the position difference ($r_{i,j} = r_i - r_j$) to each of its neighbors ($j$) and the potential $p$ (e.g. [LennardJones](https://en.wikipedia.org/wiki/Lennard-Jones_potential))."
 
 # ╔═╡ 40c9d9cd-05af-4bbf-a772-5c09c1b03a66
-md"$f_i = \sum_{\substack{j \neq i \\ |r_i - r_j| < r_{cut}}} f_{i,j}$"
+md"$f^{dft}_i = \sum_{\substack{j \neq i \\ |r_i - r_j| < r_{cut}}} f^{dft}_{i,j}$"
 
 # ╔═╡ 93450770-74c0-42f7-baca-7f8276373f9f
-md"$f_{i,j} = - \nabla LJ_{(r_{i,j})} = 24 ϵ  \left( 2 \left( \frac{σ}{|r_{i,j}|} \right) ^{12} -  \left( \frac{σ}{|r_{i,j}|} \right) ^6  \right) \frac{r_{i,j} }{|r_{i,j}|^2 }$"
+md"$f^{dft}_{i,j} = - \nabla LJ_{(r_{i,j})} = 24 ϵ  \left( 2 \left( \frac{σ}{|r_{i,j}|} \right) ^{12} -  \left( \frac{σ}{|r_{i,j}|} \right) ^6  \right) \frac{r_{i,j} }{|r_{i,j}|^2 }$"
 
 # ╔═╡ 216f84d3-ec5c-4c49-a9d7-af0e98907e15
 md"Here, the force between $i$ and $j$ is computed by the [InteratomicPotentials.jl](https://github.com/cesmix-mit/InteratomicPotentials.jl) library."
@@ -153,7 +153,7 @@ function compute_forces(neighbor_dists, p)
 end
 
 # ╔═╡ 8aa8f56a-24a1-4ddd-840e-91517fd27b9c
-md" Compute neighbor distances and forces for training and validation."
+md"The following function generates the training and test data sets consisting of the position differences with the neighbors of each atom and the surrogate DFT forces. The data sets are divided into batches using `Flux.DataLoader` and transferred to the GPU if necessary.devided in batches using `Flux.DataLoader` and transfer to the GPU if necessary."
 
 
 # ╔═╡ 4e73e519-879b-447c-b125-387a5d1d7cd9
@@ -189,87 +189,156 @@ function gen_data(train_prop, batchsize, rcutoff, p, use_cuda, device)
 end
 
 # ╔═╡ 152f05fb-ac0a-4d8d-8975-94585443853a
-md" ## Defining our model"
+md" ## Defining the loss functions"
 
-# ╔═╡ 5f89345a-49f2-4126-9974-1625135f701e
-md"GPU usage"
+# ╔═╡ fe7cf55f-cbc9-41db-8554-03fdecbc881d
+md"A simple loss function is defined. It calculates the root mean square error (rmse) between the surrogate DFT forces and the forces computed using the neural network model (defined below). The arguments of this loss function are batches of the training or test data set, N is the batch size."
 
-# ╔═╡ 5683b572-cd67-4417-bce7-d17aa7c9aa29
+# ╔═╡ dd5e6c1f-ad9b-49fa-8b5e-9cffd5781c16
+md"$loss(f^{model}, f^{dft}) = \sqrt{\frac{ {\sum_{i} |f^{model}_i - f^{dft}_i| ^2} } {N}}$"
+
+# ╔═╡ 7b48d757-18eb-4f6b-bf7f-53d8c52cf7a1
+loss(f_model, forces) = sqrt(sum(norm.(f_model .- forces).^2) / length(forces))
+
+# ╔═╡ f93f298d-6ac0-45e2-abee-ab36d85b3f7b
+md"The force of the atom $i$ is computed as"
+
+# ╔═╡ 1180e03c-482e-428a-b66c-5534bcb4de83
+md"$f^{model}_i = \sum_{r_{i,j} \ \epsilon \ neighbors\_dists(i) } model(r_{i,j})$"
+
+# ╔═╡ 08fbcf33-0935-41ce-a721-c597e2570b47
+md"The following function computes $f^{model}$ for a batch of atoms"
+
+# ╔═╡ 8a03ffbc-9ab2-438d-b71b-1d7238b33507
+f_model(d, model) = [length(di)>0 ? sum(model.(di)) : zeros(3) for di in d]
+
+# ╔═╡ 2c629ed0-e21d-4f38-b46f-fc2a1757b62f
+md"The global loss or loss of an entire data set (training or test) is the average of the losses of the batches in that data set."
+
+# ╔═╡ 48e7fa16-ea5f-44f5-84ab-2994e7382c4e
+md"$\sum_{k \ \epsilon \ \#batches(training\_set)} loss(f^{model}_k, f^{dft}_k)$"
+
+# ╔═╡ 7410e309-2ee0-4b65-af2a-c4f738a3bd80
+global_loss(loader, model) = 
+        sum([loss(f_model(d, model), f) for (d, f) in loader]) / length(loader)
+
+# ╔═╡ 2244cd54-f927-40e0-8fad-75a34096044d
+md"More complex examples can also fit energies and tensors, and/or define hybrid potentials."
+
+# ╔═╡ b481e2f6-1a87-4af3-8d93-111e2ab8d933
+md"## Defining and training the model in CPU"
+
+# ╔═╡ 16a90976-77e9-4ea0-99bd-8278d9812681
+md"The first step is to call the functions defined above to generate the training and test data sets. To do this, the Lennard-Jones interatomic potential is defined using [InteratomicPotentials.jl](https://github.com/cesmix-mit/InteratomicPotentials.jl)"
+
+# ╔═╡ 93e7f0c4-ad8c-473e-a8d3-09508f2ba6df
 begin
-use_cuda = true  # use gpu (if cuda available)
-if CUDA.functional() && use_cuda
-    @info "Training on CUDA GPU"
-    CUDA.allowscalar(false)
-    device1 = gpu
-else
-    @info "Training on CPU"
-    device1 = cpu
-end
+lj_ϵ = 1.0
+lj_σ = 1.0
+lj = LennardJones(lj_ϵ, lj_σ);
 end
 
 # ╔═╡ f1a29169-2c8a-41bc-9c35-be2c77b418ec
-md"Generate surrogate DFT data: train and test dataloaders"
+md"To finally obtain the data sets, the interatomic potential is used in combination with other input parameters: the radius of the neighborhoods ($rcutoff$), the training size ratio ($train\_prop$), the batch size ($batchsize$), and parameters related to CPU and GPU usage ($use\_cuda$ and $device1$)."
 
 # ╔═╡ 54891249-99be-4798-a0e9-5b0193ecaa3c
 begin
-train_prop = 0.8; batchsize = 256
-lj_ϵ = 1.0; lj_σ = 1.0; rcutoff = 2.5*lj_σ; lj = LennardJones(lj_ϵ, lj_σ);
-train_loader, test_loader = gen_data(train_prop, batchsize, rcutoff, lj, use_cuda, device1)
+rcutoff = 2.5 * lj_σ
+train_prop = 0.8
+batchsize = 256
+use_cuda = false
+device1 = cpu
+cpu_train_loader, cpu_test_loader = gen_data(train_prop, batchsize, rcutoff, lj, use_cuda, device1)
 end
 
 # ╔═╡ 1cb8b6d0-d645-4d16-a501-cc9d2a047b39
-md"Define the model or neural network"
+md"The neural network model and the parameters to be optimized using [Flux.jl](https://github.com/FluxML/Flux.jl). An explanation about `Chain` and `Dense` is presented [here](https://fluxml.ai/Flux.jl/stable/models/layers/#Flux.Chain)."
 
 # ╔═╡ c8c43e19-daff-4272-8703-a2dcaceca7a9
 begin
-	model = Chain(Dense(3,150,Flux.σ),Dense(150,3)) |> device1
-	ps = Flux.params(model) # model's trainable parameters
+cpu_model = Chain(Dense(3,150,Flux.σ),Dense(150,3))
+cpu_ps = Flux.params(cpu_model) # model's trainable parameters
 end
 
 # ╔═╡ fcccc8ca-97c8-43cd-ab1d-b76f126ab617
-md"Define the optimizer, η = 0.1 is the learning rate."
+md"The optimizer [ADAM](https://en.wikipedia.org/wiki/Stochastic_gradient_descent#Adam) is defined using a learning rate η = 0.1."
 
 # ╔═╡ 49d7f00a-db88-4dab-9209-c9840255d999
 opt = ADAM(0.1)
 
-# ╔═╡ fe7cf55f-cbc9-41db-8554-03fdecbc881d
-md"Define the loss function: root mean squared error (rmse)"
-
-# ╔═╡ 7410e309-2ee0-4b65-af2a-c4f738a3bd80
-begin
-loss(f_model, forces) = sqrt(sum(norm.(f_model .- forces).^2) / length(forces))
-f_model(d) = [length(di)>0 ? sum(model.(di)) : zeros(3) for di in d]
-loss(loader) = sum([loss(f_model(d), f) for (d, f) in loader]) / length(loader)
-end
-
-# ╔═╡ b481e2f6-1a87-4af3-8d93-111e2ab8d933
-md"## Training the model"
+# ╔═╡ 4481fcae-6c0c-4455-9a11-0eb1f19805cc
+md"The model is trained in the loop below."
 
 # ╔═╡ 2e199532-5177-4b39-9c7e-83d61c1e2f13
 begin
-epochs = 2
+epochs = 20
 with_terminal() do
 	for epoch in 1:epochs
 	    # Training of one epoch
-	    time = CUDA.@elapsed for (d, f) in train_loader # or time = Base.@elapsed
-	        #gs = gradient(() -> loss(f_model(d), f), ps)
-	        #Flux.Optimise.update!(opt, ps, gs)
+	    time = Base.@elapsed for (d, f) in cpu_train_loader
+	        gs = gradient(() -> loss(f_model(d, cpu_model), f), cpu_ps)
+	        Flux.Optimise.update!(opt, cpu_ps, gs)
 	    end
 	    
 	    # Report traning loss
-	    println("Epoch: $(epoch), loss: $(loss(train_loader)), time: $(time)")
+	    println("Epoch: $(epoch), loss: $(global_loss(cpu_train_loader, cpu_model)), time: $(time)")
 	end
 end
 end
 
 # ╔═╡ 74d94c45-7a66-4779-9bd8-d6987d23bdc4
-md"## Test results"
+md"### Test CPU results"
 
 # ╔═╡ 46a7f1ab-5f99-4b69-9bff-c299815cccab
 md"Root mean squared error (rmse)"
 
 # ╔═╡ 195925f3-19ea-47a2-bc31-561bf698f580
-@show "Test RMSE: $(loss(test_loader))"
+@show "Test RMSE: $(global_loss(cpu_test_loader, cpu_model))"
+
+# ╔═╡ 4d94701b-e3a5-4aef-ba23-97c1150f89a1
+md"## Defining and training the model in GPU"
+
+# ╔═╡ c2492af2-23e7-45c5-bf44-109c59d7986d
+md"This case is analogous to that of the CPU except for some differences. First, when training and test data are generated, they must be transferred to the GPU. This is done in the `gen_data` function."
+
+# ╔═╡ d4526269-07e6-4684-8bed-7cee5898ef52
+begin
+use_cuda_ = true
+device2 = gpu
+gpu_train_loader, gpu_test_loader = gen_data(train_prop, batchsize, rcutoff, lj, use_cuda_, device2)
+end
+
+# ╔═╡ 5a7e8a3f-3d8d-4048-80fe-c64e9c1cfd44
+begin
+gpu_model = Chain(Dense(3,150,Flux.σ),Dense(150,3)) |> device2
+gpu_ps = Flux.params(gpu_model) # model's trainable parameters
+end
+
+# ╔═╡ f89622bb-433a-4547-aec0-9fd3a2ffbaf2
+md"The model is trained in the loop below. In this case the elapsed time is measured using `CUDA.@elapsed`."
+
+# ╔═╡ c6e66ff5-b5f2-4c0f-9eae-f123034bd438
+begin
+epochs_ = 20
+with_terminal() do
+	for epoch in 1:epochs_
+	    # Training of one epoch
+	    time = CUDA.@elapsed for (d, f) in gpu_train_loader # or 
+	        gs = gradient(() -> loss(f_model(d, gpu_model), f), gpu_ps)
+	        Flux.Optimise.update!(opt, gpu_ps, gs)
+	    end
+	    
+	    # Report traning loss
+	    println("Epoch: $(epoch), loss: $(global_loss(gpu_train_loader, gpu_model)), time: $(time)")
+	end
+end
+end
+
+# ╔═╡ 24f677cf-ee87-4af0-9c11-5d0911f1c700
+md"### Test GPU results"
+
+# ╔═╡ d300f5ce-2cce-4739-9108-ef20ff889955
+@show "Test RMSE: $(global_loss(gpu_test_loader, gpu_model))"
 
 # ╔═╡ Cell order:
 # ╟─5dd8b98b-967c-46aa-9932-25157a10d0c2
@@ -294,18 +363,36 @@ md"Root mean squared error (rmse)"
 # ╟─8aa8f56a-24a1-4ddd-840e-91517fd27b9c
 # ╠═4e73e519-879b-447c-b125-387a5d1d7cd9
 # ╟─152f05fb-ac0a-4d8d-8975-94585443853a
-# ╟─5f89345a-49f2-4126-9974-1625135f701e
-# ╠═5683b572-cd67-4417-bce7-d17aa7c9aa29
+# ╟─fe7cf55f-cbc9-41db-8554-03fdecbc881d
+# ╟─dd5e6c1f-ad9b-49fa-8b5e-9cffd5781c16
+# ╠═7b48d757-18eb-4f6b-bf7f-53d8c52cf7a1
+# ╟─f93f298d-6ac0-45e2-abee-ab36d85b3f7b
+# ╟─1180e03c-482e-428a-b66c-5534bcb4de83
+# ╟─08fbcf33-0935-41ce-a721-c597e2570b47
+# ╠═8a03ffbc-9ab2-438d-b71b-1d7238b33507
+# ╟─2c629ed0-e21d-4f38-b46f-fc2a1757b62f
+# ╟─48e7fa16-ea5f-44f5-84ab-2994e7382c4e
+# ╠═7410e309-2ee0-4b65-af2a-c4f738a3bd80
+# ╟─2244cd54-f927-40e0-8fad-75a34096044d
+# ╟─b481e2f6-1a87-4af3-8d93-111e2ab8d933
+# ╟─16a90976-77e9-4ea0-99bd-8278d9812681
+# ╠═93e7f0c4-ad8c-473e-a8d3-09508f2ba6df
 # ╟─f1a29169-2c8a-41bc-9c35-be2c77b418ec
 # ╠═54891249-99be-4798-a0e9-5b0193ecaa3c
 # ╟─1cb8b6d0-d645-4d16-a501-cc9d2a047b39
 # ╠═c8c43e19-daff-4272-8703-a2dcaceca7a9
 # ╟─fcccc8ca-97c8-43cd-ab1d-b76f126ab617
 # ╠═49d7f00a-db88-4dab-9209-c9840255d999
-# ╟─fe7cf55f-cbc9-41db-8554-03fdecbc881d
-# ╠═7410e309-2ee0-4b65-af2a-c4f738a3bd80
-# ╟─b481e2f6-1a87-4af3-8d93-111e2ab8d933
+# ╟─4481fcae-6c0c-4455-9a11-0eb1f19805cc
 # ╠═2e199532-5177-4b39-9c7e-83d61c1e2f13
 # ╟─74d94c45-7a66-4779-9bd8-d6987d23bdc4
 # ╟─46a7f1ab-5f99-4b69-9bff-c299815cccab
 # ╠═195925f3-19ea-47a2-bc31-561bf698f580
+# ╟─4d94701b-e3a5-4aef-ba23-97c1150f89a1
+# ╟─c2492af2-23e7-45c5-bf44-109c59d7986d
+# ╠═d4526269-07e6-4684-8bed-7cee5898ef52
+# ╠═5a7e8a3f-3d8d-4048-80fe-c64e9c1cfd44
+# ╠═f89622bb-433a-4547-aec0-9fd3a2ffbaf2
+# ╠═c6e66ff5-b5f2-4c0f-9eae-f123034bd438
+# ╟─24f677cf-ee87-4af0-9c11-5d0911f1c700
+# ╠═d300f5ce-2cce-4739-9108-ef20ff889955
